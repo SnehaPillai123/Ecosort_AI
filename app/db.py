@@ -23,6 +23,7 @@ WHAT'S STILL OUT OF SCOPE (be upfront about this with judges):
 """
 
 import os
+import random
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -163,8 +164,133 @@ def init_db():
                 timestamp TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_name TEXT NOT NULL,
+                video_path TEXT NOT NULL,
+                video_hash TEXT NOT NULL,
+                caption TEXT,
+                status TEXT NOT NULL DEFAULT 'Pending',
+                ai_verdict TEXT,
+                ai_confidence REAL,
+                ai_reason TEXT,
+                points_awarded INTEGER NOT NULL DEFAULT 0,
+                timestamp TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS seen_video_hashes (
+                video_hash TEXT PRIMARY KEY,
+                user_name TEXT NOT NULL,
+                timestamp TEXT NOT NULL
+            )
+        """)
 
-        # seed a little demo content so the hub isn't empty on first launch
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS challenge_rounds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_name TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                round_num INTEGER NOT NULL,
+                true_category TEXT,
+                ai_category TEXT NOT NULL,
+                ai_confidence REAL NOT NULL,
+                user_guess TEXT NOT NULL,
+                correct INTEGER NOT NULL,
+                is_trap_category INTEGER NOT NULL DEFAULT 0,
+                time_taken_seconds REAL,
+                points INTEGER NOT NULL DEFAULT 0,
+                timestamp TEXT NOT NULL
+            )
+        """)
+
+        # =================================================================
+        # DEMO / PRESENTATION DATA
+        # ---------------------------------------------------------------
+        # Every block below is gated on its own table being empty, so this
+        # is safe to run on every app boot — which happens on every fresh
+        # Streamlit Cloud deploy/reboot, since community.db lives on
+        # ephemeral disk and does NOT persist across restarts. That means
+        # the app always comes back up with a populated leaderboard, map,
+        # and dashboard for a live demo, with zero manual setup, and real
+        # activity from real judges/users layers on top of it exactly the
+        # same as before. random.seed(7) keeps the numbers stable across
+        # reboots rather than reshuffling on every restart.
+        # =================================================================
+        random.seed(7)
+
+        def _days_ago(n, hour=None):
+            if hour is None:
+                hour = random.randint(8, 21)
+            t = time.localtime(time.time() - n * 86400)
+            return time.strftime(f"%Y-%m-%d {hour:02d}:%M:%S", t)
+
+        DEMO_USERS = ["Sneha", "Aarav", "Priya", "Rohan", "Meera", "Kabir"]
+        DEMO_CATEGORIES = ["plastic", "paper", "metal", "organic", "glass",
+                            "cardboard", "trash", "battery", "clothes", "shoes"]
+        TRAP_CATS = {"cardboard", "paper", "glass", "plastic", "metal", "battery"}
+
+        # ---- Activity (drives the leaderboard, Analytics page, points) ----
+        if conn.execute("SELECT COUNT(*) c FROM activity").fetchone()["c"] == 0:
+            for user in DEMO_USERS:
+                for _ in range(random.randint(8, 16)):
+                    cat = random.choice(DEMO_CATEGORIES)
+                    conf = round(random.uniform(0.78, 0.99), 2)
+                    pts = random.choice([5, 5, 8, 10])
+                    conn.execute(
+                        "INSERT INTO activity (user_name, kind, category, confidence, points, timestamp) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (user, "classify", cat, conf, pts, _days_ago(random.randint(0, 20))),
+                    )
+            for user, kind, pts, day in [
+                ("Sneha", "multiscan", 12, 3), ("Aarav", "multiscan", 9, 5),
+                ("Meera", "multiscan", 11, 8),
+                ("Priya", "cleanup_completed", 15, 7), ("Rohan", "cleanup_completed", 15, 7),
+                ("Kabir", "cleanup_completed", 15, 13),
+            ]:
+                conn.execute(
+                    "INSERT INTO activity (user_name, kind, category, confidence, points, timestamp) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (user, kind, None, None, pts, _days_ago(day)),
+                )
+
+        # ---- Issue reports (drives Impact Map + hotspots) — three real ----
+        # Mumbai locations, each with >=3 reports within ~1km so they
+        # trigger get_hotspots() automatically, plus two one-off reports.
+        if conn.execute("SELECT COUNT(*) c FROM issues").fetchone()["c"] == 0:
+            HOTSPOT_CLUSTERS = [
+                ("Marine Drive, near Gate 2", 18.9432, 72.8235),
+                ("Juhu Beach, near Lifeguard Post 4", 19.0990, 72.8258),
+                ("Powai Lake, promenade side", 19.1176, 72.9060),
+            ]
+            ISSUE_TYPES = ["Illegal dumping", "Overflowing / uncollected bin",
+                           "Bad odor / suspected health hazard", "Standing water / pest concern", "Other"]
+            STATUSES = ["Submitted", "In Progress", "Resolved — Cleaned Up"]
+            for loc, lat, lon in HOTSPOT_CLUSTERS:
+                for _ in range(random.randint(3, 5)):
+                    conn.execute(
+                        "INSERT INTO issues (user_name, issue_type, location, notes, photo_path, "
+                        "status, lat, lon, timestamp) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (random.choice(DEMO_USERS), random.choice(ISSUE_TYPES), loc,
+                         "Reported during a routine walk-through.", None, random.choice(STATUSES),
+                         lat + random.uniform(-0.0008, 0.0008), lon + random.uniform(-0.0008, 0.0008),
+                         _days_ago(random.randint(0, 18))),
+                    )
+            for loc, lat, lon in [
+                ("Bandra Bandstand promenade", 19.0483, 72.8200),
+                ("Andheri Sports Complex", 19.1197, 72.8468),
+            ]:
+                conn.execute(
+                    "INSERT INTO issues (user_name, issue_type, location, notes, photo_path, "
+                    "status, lat, lon, timestamp) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (random.choice(DEMO_USERS), random.choice(ISSUE_TYPES), loc,
+                     "One-off report.", None, "Submitted", lat, lon, _days_ago(random.randint(0, 10))),
+                )
+
+        # ---- Events — 2 upcoming (as before) + 2 already-completed, so ----
+        # the Impact Dashboard's before/after + completed-cleanup stats
+        # aren't empty on first launch either.
         if conn.execute("SELECT COUNT(*) c FROM events").fetchone()["c"] == 0:
             for title, date, loc in [
                 ("Riverside Park Cleanup", "2026-09-27", "Riverside Park, Gate 2"),
@@ -174,6 +300,23 @@ def init_db():
                     "INSERT INTO events (title, date, location, created_by, timestamp) VALUES (?,?,?,?,?)",
                     (title, date, loc, "Demo", now()),
                 )
+            for title, loc, lat, lon, day in [
+                ("Marine Drive Cleanup Drive", "Marine Drive, near Gate 2", 18.9432, 72.8235, 12),
+                ("Juhu Beach Community Cleanup", "Juhu Beach, near Lifeguard Post 4", 19.0990, 72.8258, 6),
+            ]:
+                cur = conn.execute(
+                    "INSERT INTO events (title, date, location, created_by, status, lat, lon, "
+                    "completed_at, timestamp) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (title, _days_ago(day + 4)[:10], loc, "Demo", "completed", lat, lon,
+                     _days_ago(day), _days_ago(day + 4)),
+                )
+                for user in random.sample(DEMO_USERS, k=3):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO rsvps (event_id, user_name) VALUES (?,?)",
+                        (cur.lastrowid, user),
+                    )
+
+        # ---- Marketplace (unchanged from before) ----
         if conn.execute("SELECT COUNT(*) c FROM marketplace").fetchone()["c"] == 0:
             for item, swaps, price in [
                 ("Cotton Tote Bag", "Single-use plastic bags", "₹60–100"),
@@ -184,6 +327,38 @@ def init_db():
                     "INSERT INTO marketplace (item, swaps_for, price, submitted_by, timestamp) VALUES (?,?,?,?,?)",
                     (item, swaps, price, "Demo listing", now()),
                 )
+
+        # ---- Reward redemptions (Community Hub rewards shelf) ----
+        if conn.execute("SELECT COUNT(*) c FROM redemptions").fetchone()["c"] == 0:
+            for user, reward, cost, day in [
+                ("Sneha", "Recycled Plastic Pen", 25, 4),
+                ("Priya", "Recycled Paper Notebook", 40, 9),
+            ]:
+                conn.execute(
+                    "INSERT INTO redemptions (user_name, reward_name, cost, timestamp) VALUES (?,?,?,?)",
+                    (user, reward, cost, _days_ago(day)),
+                )
+
+        # ---- Sorting Challenge rounds (Challenge leaderboard) ----
+        if conn.execute("SELECT COUNT(*) c FROM challenge_rounds").fetchone()["c"] == 0:
+            for user in DEMO_USERS[:4]:
+                day = random.randint(0, 15)
+                for rnd in range(1, 6):
+                    cat = random.choice(DEMO_CATEGORIES)
+                    correct = random.random() < 0.7
+                    guess = cat if correct else random.choice(DEMO_CATEGORIES)
+                    pts = 0
+                    if correct:
+                        pts = 10 + (5 if cat in TRAP_CATS else 0)
+                    conn.execute(
+                        """INSERT INTO challenge_rounds
+                           (user_name, session_id, round_num, true_category, ai_category, ai_confidence,
+                            user_guess, correct, is_trap_category, time_taken_seconds, points, timestamp)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (user, f"demo-{user.lower()}-1", rnd, cat, cat,
+                         round(random.uniform(0.8, 0.98), 2), guess, int(correct), int(cat in TRAP_CATS),
+                         round(random.uniform(1.5, 6.0), 1), pts, _days_ago(day)),
+                    )
 
 
 # ---------------------------------------------------------------------
@@ -207,6 +382,84 @@ def get_user_points(user_name: str) -> int:
             "SELECT COALESCE(SUM(cost),0) t FROM redemptions WHERE user_name=?", (user_name,)
         ).fetchone()["t"]
         return earned - spent
+
+
+# ---------------------------------------------------------------------
+# Sorting Challenge — "beat the AI" timed guessing game. TRAP_CATEGORIES
+# is derived from this project's own confusion matrix (see
+# eval_results/classification_report.txt): the category pairs the
+# trained model itself confuses most often, used here to award bonus
+# points when a player correctly calls one of these harder items —
+# genuinely "the model traditionally struggles with these", not an
+# arbitrary difficulty label.
+# ---------------------------------------------------------------------
+TRAP_CATEGORIES = {"cardboard", "paper", "glass", "plastic", "metal", "battery"}
+TRAP_BONUS_POINTS = 5
+BASE_ROUND_POINTS = 10
+SPEED_BONUS_SECONDS = 5  # guess within this many seconds for a speed bonus
+SPEED_BONUS_POINTS = 5
+
+
+def score_challenge_round(ai_category: str, user_guess: str, time_taken_seconds: float) -> dict:
+    """Pure scoring logic (no DB writes) so it can be unit-tested /
+    reused by the UI before committing a round."""
+    correct = user_guess.strip().lower() == ai_category.strip().lower()
+    is_trap = ai_category.strip().lower() in TRAP_CATEGORIES
+    points = 0
+    if correct:
+        points += BASE_ROUND_POINTS
+        if is_trap:
+            points += TRAP_BONUS_POINTS
+        if time_taken_seconds is not None and time_taken_seconds <= SPEED_BONUS_SECONDS:
+            points += SPEED_BONUS_POINTS
+    return {"correct": correct, "is_trap": is_trap, "points": points}
+
+
+def log_challenge_round(user_name: str, session_id: str, round_num: int, ai_category: str,
+                         ai_confidence: float, user_guess: str, time_taken_seconds: float,
+                         true_category: str = None) -> dict:
+    result = score_challenge_round(ai_category, user_guess, time_taken_seconds)
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO challenge_rounds
+               (user_name, session_id, round_num, true_category, ai_category, ai_confidence,
+                user_guess, correct, is_trap_category, time_taken_seconds, points, timestamp)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (user_name, session_id, round_num, true_category, ai_category, ai_confidence,
+             user_guess, int(result["correct"]), int(result["is_trap"]), time_taken_seconds,
+             result["points"], now()),
+        )
+    if result["points"] > 0:
+        log_activity(user_name, "challenge_round", points=result["points"], category=ai_category)
+    return result
+
+
+def get_challenge_leaderboard(limit: int = 10):
+    """Best single-session total per user, most recent session wins ties."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT user_name, session_id, SUM(points) AS session_points,
+                      SUM(correct) AS correct_count, COUNT(*) AS rounds_played,
+                      MAX(timestamp) AS last_played
+               FROM challenge_rounds
+               GROUP BY user_name, session_id
+               ORDER BY session_points DESC, last_played DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_user_challenge_stats(user_name: str):
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) AS rounds_played, COALESCE(SUM(correct),0) AS correct_count,
+                      COALESCE(SUM(points),0) AS total_points,
+                      COALESCE(SUM(CASE WHEN is_trap_category=1 AND correct=1 THEN 1 ELSE 0 END),0) AS trap_wins
+               FROM challenge_rounds WHERE user_name=?""",
+            (user_name,),
+        ).fetchone()
+        return dict(row)
 
 
 def get_leaderboard(limit: int = 10):
@@ -574,6 +827,67 @@ def image_hash_seen(image_hash: str) -> bool:
             "SELECT 1 FROM seen_image_hashes WHERE image_hash = ? LIMIT 1", (image_hash,)
         ).fetchone()
         return row is not None
+
+
+# ---------------------------------------------------------------------
+# Eco Reels — real-world "I actually did this" video submissions.
+#
+# HONEST LIMITATION (be upfront about this with judges): "verified" here
+# means two specific, real checks, not a general fraud-proof guarantee:
+#   1. Exact-hash duplicate detection (see seen_video_hashes) — catches
+#      the *identical* video file being resubmitted, by the same person
+#      or copied from someone else. It will NOT catch a re-encoded,
+#      re-cropped, or screen-recorded copy of the same footage — that
+#      would need perceptual video hashing, which isn't implemented here.
+#   2. An AI content check (Gemini, see verify_reel_with_gemini in
+#      app.py) that the footage plausibly shows a real waste-sorting /
+#      recycling / cleanup action, with a stated confidence and reason.
+# Neither of these can confirm the clip hasn't already been posted
+# somewhere else on social media — that would require a licensed
+# reverse-video-search API this project doesn't have. Points are only
+# ever awarded when both checks pass; nothing here claims to catch a
+# determined fake.
+# ---------------------------------------------------------------------
+
+def check_and_register_video_hash(video_hash: str, user_name: str) -> bool:
+    """Returns True if this exact video hasn't been submitted before
+    (by anyone) — False if it's an exact duplicate/copy."""
+    with get_conn() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO seen_video_hashes (video_hash, user_name, timestamp) VALUES (?,?,?)",
+                (video_hash, user_name, now()),
+            )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def add_reel(user_name: str, video_path: str, video_hash: str, caption: str, status: str,
+             ai_verdict: str = None, ai_confidence: float = None, ai_reason: str = None,
+             points_awarded: int = 0) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO reels
+               (user_name, video_path, video_hash, caption, status, ai_verdict, ai_confidence, ai_reason, points_awarded, timestamp)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (user_name, video_path, video_hash, caption, status, ai_verdict, ai_confidence, ai_reason, points_awarded, now()),
+        )
+        return cur.lastrowid
+
+
+def get_reels(limit: int = 30):
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM reels ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_user_reels(user_name: str, limit: int = 50):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM reels WHERE user_name=? ORDER BY id DESC LIMIT ?", (user_name, limit)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------
