@@ -131,7 +131,7 @@ def detect_items_with_gemini(client, image_bytes: bytes, mime_type: str = "image
     normalized coordinates, or raises on failure (caller handles fallback).
     """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash",
         contents=[
             genai_types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
             GEMINI_DETECT_PROMPT,
@@ -859,6 +859,36 @@ def _multiscan_gemini(image, uploaded, gemini_client):
     return results, items
 
 
+GEMINI_LABEL_KEYWORDS = {
+    # keyword found in Gemini's free-text guess -> our model's category names
+    "plastic": "plastic", "bottle": "plastic", "bag": "plastic", "jug": "plastic",
+    "wrapper": "plastic", "straw": "plastic", "lid": "plastic",
+    "paper": "paper", "carton": "paper", "napkin": "paper", "newspaper": "paper",
+    "cardboard": "cardboard", "box": "cardboard",
+    "metal": "metal", "can": "metal", "aluminum": "metal", "aluminium": "metal",
+    "tin": "metal", "foil": "metal",
+    "glass": "glass", "jar": "glass",
+    "organic": "organic", "food": "organic", "fruit": "organic", "vegetable": "organic",
+    "peel": "organic",
+    "biological": "biological",
+    "battery": "battery",
+    "clothes": "clothes", "shirt": "clothes", "fabric": "clothes", "cloth": "clothes",
+    "shoe": "shoes", "sneaker": "shoes", "sandal": "shoes",
+    "trash": "trash",
+}
+
+
+def gemini_label_to_category(label: str):
+    """Best-effort mapping of Gemini's free-text guess to one of our model's
+    trained categories, so the Agreement column compares like with like
+    instead of naively string-matching two different vocabularies."""
+    words = label.lower().replace("-", " ").split()
+    for word in words:
+        if word in GEMINI_LABEL_KEYWORDS:
+            return GEMINI_LABEL_KEYWORDS[word]
+    return None
+
+
 def page_multiscan():
     theme.page_header(
         "🧩", "Smart Multi-Item Scan",
@@ -897,6 +927,9 @@ def page_multiscan():
                 "- An item spanning multiple cells may be counted more than once."
             )
 
+    # Always defined, so scan_key below never hits an UnboundLocalError —
+    # only shown to the user (and actually used) when Gemini isn't active.
+    grid_size = 3
     if not gemini_client:
         grid_size = st.select_slider("Grid size", options=[2, 3, 4], value=3)
 
@@ -914,7 +947,7 @@ def page_multiscan():
             flat_results, gemini_items = _multiscan_gemini(image, uploaded, gemini_client)
         except Exception as e:
             st.warning(f"Gemini scan failed ({e}) — falling back to grid scan.")
-            flat_results = _multiscan_grid_fallback(image, uploaded)
+            flat_results = _multiscan_grid_fallback(image, uploaded, grid_size)
     else:
         flat_results = _multiscan_grid_fallback(image, uploaded, grid_size)
 
@@ -933,7 +966,13 @@ def page_multiscan():
     if gemini_items is not None and confident:
         table_rows = []
         for r in confident:
-            agree = "✅ agree" if r["gemini_label"].lower().split()[-1] in r["predicted_class"].lower() else "↔️ differ"
+            gemini_category = gemini_label_to_category(r["gemini_label"])
+            if gemini_category is None:
+                agree = "❓ unclear"
+            elif gemini_category == r["predicted_class"].lower():
+                agree = "✅ agree"
+            else:
+                agree = "↔️ differ"
             table_rows.append({
                 "Our model's label": f"{r['icon']} {r['predicted_class'].title()}",
                 "Confidence": f"{r['confidence']*100:.0f}%",
