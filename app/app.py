@@ -959,27 +959,60 @@ def page_multiscan():
     confident_dup = [r for r in confident if r["is_duplicate"]]
 
     st.write("")
+    if gemini_items is not None and confident:
+        st.markdown("#### 🧠 Final AI Decision")
+        st.caption(
+            "Our MobileNetV2 model makes the call on category and bin. Gemini's "
+            "description is shown as a plain-language second opinion, not a "
+            "competing probability — it isn't asked to output a confidence score."
+        )
+        for r in confident:
+            guidance = r["guidance"]
+            gemini_category = gemini_label_to_category(r["gemini_label"])
+            if gemini_category is None:
+                agree_note = f"💡 Gemini described this as \"{r['gemini_label']}\" — no clear category match to compare against."
+            elif gemini_category == r["predicted_class"].lower():
+                agree_note = f"✅ Gemini's description (\"{r['gemini_label']}\") matches our model's category."
+            else:
+                agree_note = (
+                    f"⚠️ Gemini described this as \"{r['gemini_label']}\" ({gemini_category}), "
+                    f"which differs from our model's call — worth a second look."
+                )
+            with st.container(border=True):
+                col1, col2 = st.columns([1, 4])
+                with col1:
+                    st.markdown(f"## {r['icon']}")
+                with col2:
+                    st.markdown(f"##### {r['predicted_class'].title()}")
+                    st.caption(f"🗑️ {guidance.get('bin', 'See disposal guide')}")
+                    st.write(f"**Model confidence:** {r['conf_level']['emoji']} {r['conf_level']['label']}")
+                    st.caption(agree_note)
+
+    with st.expander("📋 Raw model-vs-Gemini comparison table"):
+        if gemini_items is not None and confident:
+            table_rows = []
+            for r in confident:
+                gemini_category = gemini_label_to_category(r["gemini_label"])
+                if gemini_category is None:
+                    agree = "❓ unclear"
+                elif gemini_category == r["predicted_class"].lower():
+                    agree = "✅ agree"
+                else:
+                    agree = "↔️ differ"
+                table_rows.append({
+                    "Our model's label": f"{r['icon']} {r['predicted_class'].title()}",
+                    "Model confidence": r["conf_level"]["label"],
+                    "Gemini's description": r["gemini_label"],
+                    "Agreement": agree,
+                })
+            st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Comparison table only applies to Gemini-powered scans.")
+
+    st.write("")
     st.markdown("#### 📋 Detected Items Summary")
     unit = "item(s)" if gemini_items is not None else "cells"
     st.caption(f"{len(confident)} of {len(flat_results)} {unit} classified with ≥60% confidence.")
-
-    if gemini_items is not None and confident:
-        table_rows = []
-        for r in confident:
-            gemini_category = gemini_label_to_category(r["gemini_label"])
-            if gemini_category is None:
-                agree = "❓ unclear"
-            elif gemini_category == r["predicted_class"].lower():
-                agree = "✅ agree"
-            else:
-                agree = "↔️ differ"
-            table_rows.append({
-                "Our model's label": f"{r['icon']} {r['predicted_class'].title()}",
-                "Confidence": f"{r['confidence']*100:.0f}%",
-                "Gemini's guess": r["gemini_label"],
-                "Agreement": agree,
-            })
-        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
     counts = {}
     for r in confident:
