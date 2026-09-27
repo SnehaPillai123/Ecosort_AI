@@ -131,7 +131,7 @@ def detect_items_with_gemini(client, image_bytes: bytes, mime_type: str = "image
     normalized coordinates, or raises on failure (caller handles fallback).
     """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash",
         contents=[
             genai_types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
             GEMINI_DETECT_PROMPT,
@@ -724,51 +724,250 @@ def page_impact():
 # Page: Impact Map
 # ---------------------------------------------------------------------
 def page_map():
+    # Upgraded Impact Map: hotspot ranking, view-mode toggle, filters,
+    # before/after comparison, AI recommendation, Plan Route button.
+    # Uses existing db.get_map_points(), db.get_hotspots(), db.get_issues(),
+    # db.get_events(), db.get_completed_events() — no new DB tables needed.
     theme.page_header(
-        "🗺️", "Impact Map",
-        "Reported issues and cleanup events, geocoded from their typed location "
-        "via OpenStreetMap — a live map of where the community is acting.",
+        "🌍", "Impact Map",
+        "See where waste is accumulating and where action is happening — "
+        "a live geographic picture of every report and cleanup in the system.",
     )
 
-    hotspots = db.get_hotspots(min_reports=3, days=30)
-    if hotspots:
-        st.markdown("#### 🔴 Waste Hotspots *(rule-based clustering, last 30 days)*")
-        for h in hotspots:
-            with st.container(border=True):
-                st.markdown(f"**🔴 {h['location_label']}** — {h['count']} reports in the last 30 days")
-                st.caption(f"Recommended action: {h['recommended_action']}")
-        st.write("")
+    # ── Inline CSS ────────────────────────────────────────────────────────────
+    st.markdown("""
+<style>
+.map-metric{background:#f0f7f0;border:1px solid #c3dfc3;border-radius:10px;padding:14px 18px;text-align:center;}
+.map-metric-num{font-size:1.9rem;font-weight:800;color:#1B6B4A;}
+.map-metric-lbl{font-size:0.82rem;color:#3a7a5a;margin-top:3px;}
+.hs-red{border-left:4px solid #dc2626;background:#fef2f2;border-radius:8px;padding:12px 16px;margin:5px 0;}
+.hs-orange{border-left:4px solid #ea580c;background:#fff7ed;border-radius:8px;padding:12px 16px;margin:5px 0;}
+.hs-green{border-left:4px solid #16a34a;background:#f0fdf4;border-radius:8px;padding:12px 16px;margin:5px 0;}
+.reco-card{background:#eff6ff;border:1px solid #93c5fd;border-radius:12px;padding:18px 20px;margin-top:6px;}
+.reco-title{color:#1d4ed8;font-weight:700;font-size:1.05rem;}
+.ba-before{background:#fef2f2;border-radius:8px;padding:14px;}
+.ba-after{background:#f0fdf4;border-radius:8px;padding:14px;}
+</style>""", unsafe_allow_html=True)
 
-    points = db.get_map_points()
-    if not points:
-        theme.empty_state(
-            "🗺️", "Nothing pinned yet",
-            "Report an issue or organize a cleanup with a real, geocodable "
-            "location (e.g. a place name or address) and it'll show up here. "
-            "Vague locations like \"behind the shed\" may not geocode — that's OK, "
-            "the report/event still works, it just won't get a pin.",
+    # ── Fetch data ────────────────────────────────────────────────────────────
+    all_points   = db.get_map_points()
+    all_issues   = db.get_issues(limit=200)
+    completed    = db.get_completed_events()
+    hotspots     = db.get_hotspots(min_reports=2, days=30)
+
+    # ── Filter bar ────────────────────────────────────────────────────────────
+    st.markdown("---")
+    fc1, fc2, fc3, fc4 = st.columns([2, 2, 2, 2])
+    with fc1:
+        view_mode = st.selectbox(
+            "Map View",
+            ["Reports", "Hotspots", "Cleanups", "Impact (resolved)"],
+            key="map_view_mode",
         )
-        return
+    with fc2:
+        status_filter = st.selectbox(
+            "Status", ["All", "Submitted", "Resolved — Cleaned Up"],
+            key="map_status_filter",
+        )
+    with fc3:
+        kind_filter = st.selectbox(
+            "Type", ["All", "Issue Report", "Cleanup Event"],
+            key="map_kind_filter",
+        )
+    with fc4:
+        area_filter = st.text_input(
+            "Area keyword", placeholder="e.g. Park, Andheri…",
+            key="map_area_filter",
+        )
 
-    map_df = pd.DataFrame(points)
-    map_df["color"] = map_df["kind"].apply(
-        lambda k: [244, 162, 97] if k == "Issue Report" else [45, 106, 79]
-    )
-    map_df["size"] = 120
+    # Apply filters
+    filtered_points = all_points[:]
+    if status_filter != "All":
+        filtered_points = [p for p in filtered_points if p.get("status") == status_filter]
+    if kind_filter != "All":
+        filtered_points = [p for p in filtered_points if p.get("kind") == kind_filter]
+    if area_filter.strip():
+        kw = area_filter.strip().lower()
+        filtered_points = [p for p in filtered_points if kw in p.get("location", "").lower()]
 
-    st.map(map_df, latitude="lat", longitude="lon", color="color", size="size")
+    st.markdown(f"**🔎 {len(filtered_points)} location(s) match your filters**")
+    st.markdown("---")
 
-    legend_col1, legend_col2 = st.columns(2)
-    legend_col1.markdown("🟠 **Issue Reports** — spotted waste, awaiting cleanup")
-    legend_col2.markdown("🟢 **Cleanup Events** — organized or completed")
+    # ── Map + side panel ──────────────────────────────────────────────────────
+    map_col, side_col = st.columns([3, 2])
 
-    st.write("")
+    with map_col:
+        st.markdown(f"##### 🗺️ {view_mode}")
+
+        if view_mode == "Reports":
+            disp = [p for p in filtered_points if p["kind"] == "Issue Report"]
+        elif view_mode == "Cleanups":
+            disp = [p for p in filtered_points if p["kind"] == "Cleanup Event"]
+        elif view_mode == "Impact (resolved)":
+            disp = [p for p in filtered_points if "Resolved" in str(p.get("status", ""))]
+        else:
+            # Hotspots — show all issue pins
+            disp = [p for p in all_points if p["kind"] == "Issue Report"]
+
+        if not disp and not all_points:
+            theme.empty_state(
+                "🗺️", "Nothing pinned yet",
+                "Report an issue or organise a cleanup with a real location "
+                "(e.g. a place name or address) and it will appear here. "
+                "Vague locations like 'behind the shed' may not geocode — "
+                "that's OK, the report still works, it just won't get a pin.",
+            )
+        else:
+            rows = disp if disp else all_points
+            map_df = pd.DataFrame(rows)
+
+            def _color(row):
+                if row.get("kind") == "Cleanup Event":
+                    return [45, 106, 79]
+                if "Resolved" in str(row.get("status", "")):
+                    return [34, 197, 94]
+                return [244, 162, 97]
+
+            map_df["color"] = map_df.apply(_color, axis=1)
+            map_df["size"]  = 140
+            st.map(map_df, latitude="lat", longitude="lon", color="color", size="size")
+
+        lc1, lc2, lc3 = st.columns(3)
+        lc1.markdown("🟠 **Issue Reports**")
+        lc2.markdown("🟢 **Cleanups / Resolved**")
+        lc3.caption("*(geocoded pins only)*")
+
+    with side_col:
+        # ── Summary metrics ───────────────────────────────────────────────
+        n_issues   = len(all_issues)
+        n_unres    = sum(1 for i in all_issues
+                        if "Resolved" not in str(i.get("status", "")))
+        n_cleanups = len(completed)
+        m1, m2, m3 = st.columns(3)
+        m1.markdown(
+            f'<div class="map-metric"><div class="map-metric-num">{n_issues}</div>'
+            f'<div class="map-metric-lbl">📍 Reports</div></div>',
+            unsafe_allow_html=True,
+        )
+        m2.markdown(
+            f'<div class="map-metric"><div class="map-metric-num">{n_unres}</div>'
+            f'<div class="map-metric-lbl">⚠️ Unresolved</div></div>',
+            unsafe_allow_html=True,
+        )
+        m3.markdown(
+            f'<div class="map-metric"><div class="map-metric-num">{n_cleanups}</div>'
+            f'<div class="map-metric-lbl">🧹 Done</div></div>',
+            unsafe_allow_html=True,
+        )
+
+        # ── Hotspot ranking ───────────────────────────────────────────────
+        st.write("")
+        st.markdown("##### 📊 Area Hotspots *(last 30 days)*")
+        if hotspots:
+            for h in hotspots[:5]:
+                cnt = h["count"]
+                css   = "hs-red"    if cnt >= 5 else ("hs-orange" if cnt >= 3 else "hs-green")
+                emoji = "🔴"        if cnt >= 5 else ("🟠"        if cnt >= 3 else "🟢")
+                st.markdown(
+                    f'<div class="{css}"><strong>{emoji} {h["location_label"]}</strong>' +
+                    f'<br/><small>{cnt} reports · {h["recommended_action"]}</small></div>',
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info(
+                "No hotspots yet — at least 2 reports at the same location "
+                "will trigger automatic area clustering."
+            )
+
+    st.markdown("---")
+
+    # ── Before / After ────────────────────────────────────────────────────────
+    if completed:
+        st.markdown("##### 📉 Before vs After — Most Recent Cleanup")
+        ev  = completed[0]
+        ba1, ba2 = st.columns(2)
+        with ba1:
+            st.markdown(
+                f'<div class="ba-before"><strong>🔴 BEFORE — {ev["title"]}</strong>' +
+                f'<br/>📍 {ev["location"]}</div>',
+                unsafe_allow_html=True,
+            )
+            bpath = ev.get("before_photo_path")
+            if bpath and os.path.exists(bpath):
+                st.image(bpath, use_container_width=True)
+            else:
+                st.caption("*(no before-photo on record)*")
+        with ba2:
+            pcount = ev.get("participant_count", 0)
+            st.markdown(
+                f'<div class="ba-after"><strong>🟢 AFTER CLEANUP</strong>' +
+                f'<br/>✅ Completed {ev.get("completed_at","")}' +
+                f'<br/>👥 {pcount} volunteer(s)</div>',
+                unsafe_allow_html=True,
+            )
+            apath = ev.get("after_photo_path")
+            if apath and os.path.exists(apath):
+                st.image(apath, use_container_width=True)
+            else:
+                st.caption("*(no after-photo on record)*")
+
+        if len(completed) > 1:
+            with st.expander(f"See all {len(completed)} completed cleanups"):
+                for ev2 in completed[1:]:
+                    st.caption(
+                        f"✅ **{ev2['title']}** · {ev2['location']} · "
+                        f"completed {ev2.get('completed_at','—')} · "
+                        f"{ev2.get('participant_count',0)} volunteer(s)"
+                    )
+        st.markdown("---")
+
+    # ── AI-style Recommendation ───────────────────────────────────────────────
+    st.markdown("##### 🤖 EcoSort Recommendation *(rule-based, from stored data)*")
+    if hotspots:
+        top = hotspots[0]
+        st.markdown(
+            f'<div class="reco-card">' +
+            f'<div class="reco-title">🤖 Priority Cleanup Area: {top["location_label"]}</div>' +
+            f'<br/><p>Based on <strong>{top["count"]} reports</strong> in the last 30 days.' +
+            f'<br/>📋 {top["recommended_action"]}</p></div>',
+            unsafe_allow_html=True,
+        )
+        st.write("")
+        if st.button(
+            "🗺️ Plan Cleanup Route for this area →",
+            type="primary", use_container_width=True, key="map_plan_route",
+        ):
+            st.session_state["route_area"] = top["location_label"]
+            st.success(
+                f"✅ Route area set to **{top['location_label']}**. "
+                "Head to **Route Planner** in the sidebar to continue!"
+            )
+    elif all_issues:
+        st.info(
+            "No clusters yet — more reports at the same location will trigger "
+            "an automatic priority recommendation here."
+        )
+    else:
+        theme.empty_state(
+            "🤖", "Nothing to recommend yet",
+            "Report issues from the Classify page — areas are automatically "
+            "ranked by activity as soon as reports come in.",
+        )
+
+    st.markdown("---")
+
+    # ── Full table ────────────────────────────────────────────────────────────
     st.markdown("##### 📍 All pinned locations")
-    display_df = map_df[["kind", "label", "location", "status"]].rename(
-        columns={"kind": "Type", "label": "Title", "location": "Location", "status": "Status"}
-    )
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
-
+    if filtered_points:
+        display_df = pd.DataFrame(filtered_points)[
+            ["kind", "label", "location", "status"]
+        ].rename(columns={
+            "kind": "Type", "label": "Title",
+            "location": "Location", "status": "Status",
+        })
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No locations match the current filters.")
 
 # ---------------------------------------------------------------------
 # Page: Multi-Item Scan (grid segmentation — classify several items
@@ -859,6 +1058,36 @@ def _multiscan_gemini(image, uploaded, gemini_client):
     return results, items
 
 
+GEMINI_LABEL_KEYWORDS = {
+    # keyword found in Gemini's free-text guess -> our model's category names
+    "plastic": "plastic", "bottle": "plastic", "bag": "plastic", "jug": "plastic",
+    "wrapper": "plastic", "straw": "plastic", "lid": "plastic",
+    "paper": "paper", "carton": "paper", "napkin": "paper", "newspaper": "paper",
+    "cardboard": "cardboard", "box": "cardboard",
+    "metal": "metal", "can": "metal", "aluminum": "metal", "aluminium": "metal",
+    "tin": "metal", "foil": "metal",
+    "glass": "glass", "jar": "glass",
+    "organic": "organic", "food": "organic", "fruit": "organic", "vegetable": "organic",
+    "peel": "organic",
+    "biological": "biological",
+    "battery": "battery",
+    "clothes": "clothes", "shirt": "clothes", "fabric": "clothes", "cloth": "clothes",
+    "shoe": "shoes", "sneaker": "shoes", "sandal": "shoes",
+    "trash": "trash",
+}
+
+
+def gemini_label_to_category(label: str):
+    """Best-effort mapping of Gemini's free-text guess to one of our model's
+    trained categories, so the Agreement column compares like with like
+    instead of naively string-matching two different vocabularies."""
+    words = label.lower().replace("-", " ").split()
+    for word in words:
+        if word in GEMINI_LABEL_KEYWORDS:
+            return GEMINI_LABEL_KEYWORDS[word]
+    return None
+
+
 def page_multiscan():
     theme.page_header(
         "🧩", "Smart Multi-Item Scan",
@@ -897,6 +1126,9 @@ def page_multiscan():
                 "- An item spanning multiple cells may be counted more than once."
             )
 
+    # Always defined, so scan_key below never hits an UnboundLocalError —
+    # only shown to the user (and actually used) when Gemini isn't active.
+    grid_size = 3
     if not gemini_client:
         grid_size = st.select_slider("Grid size", options=[2, 3, 4], value=3)
 
@@ -914,7 +1146,7 @@ def page_multiscan():
             flat_results, gemini_items = _multiscan_gemini(image, uploaded, gemini_client)
         except Exception as e:
             st.warning(f"Gemini scan failed ({e}) — falling back to grid scan.")
-            flat_results = _multiscan_grid_fallback(image, uploaded)
+            flat_results = _multiscan_grid_fallback(image, uploaded, grid_size)
     else:
         flat_results = _multiscan_grid_fallback(image, uploaded, grid_size)
 
@@ -926,21 +1158,60 @@ def page_multiscan():
     confident_dup = [r for r in confident if r["is_duplicate"]]
 
     st.write("")
+    if gemini_items is not None and confident:
+        st.markdown("#### 🧠 Final AI Decision")
+        st.caption(
+            "Our MobileNetV2 model makes the call on category and bin. Gemini's "
+            "description is shown as a plain-language second opinion, not a "
+            "competing probability — it isn't asked to output a confidence score."
+        )
+        for r in confident:
+            guidance = r["guidance"]
+            gemini_category = gemini_label_to_category(r["gemini_label"])
+            if gemini_category is None:
+                agree_note = f"💡 Gemini described this as \"{r['gemini_label']}\" — no clear category match to compare against."
+            elif gemini_category == r["predicted_class"].lower():
+                agree_note = f"✅ Gemini's description (\"{r['gemini_label']}\") matches our model's category."
+            else:
+                agree_note = (
+                    f"⚠️ Gemini described this as \"{r['gemini_label']}\" ({gemini_category}), "
+                    f"which differs from our model's call — worth a second look."
+                )
+            with st.container(border=True):
+                col1, col2 = st.columns([1, 4])
+                with col1:
+                    st.markdown(f"## {r['icon']}")
+                with col2:
+                    st.markdown(f"##### {r['predicted_class'].title()}")
+                    st.caption(f"🗑️ {guidance.get('bin', 'See disposal guide')}")
+                    st.write(f"**Model confidence:** {r['conf_level']['emoji']} {r['conf_level']['label']}")
+                    st.caption(agree_note)
+
+    with st.expander("📋 Raw model-vs-Gemini comparison table"):
+        if gemini_items is not None and confident:
+            table_rows = []
+            for r in confident:
+                gemini_category = gemini_label_to_category(r["gemini_label"])
+                if gemini_category is None:
+                    agree = "❓ unclear"
+                elif gemini_category == r["predicted_class"].lower():
+                    agree = "✅ agree"
+                else:
+                    agree = "↔️ differ"
+                table_rows.append({
+                    "Our model's label": f"{r['icon']} {r['predicted_class'].title()}",
+                    "Model confidence": r["conf_level"]["label"],
+                    "Gemini's description": r["gemini_label"],
+                    "Agreement": agree,
+                })
+            st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Comparison table only applies to Gemini-powered scans.")
+
+    st.write("")
     st.markdown("#### 📋 Detected Items Summary")
     unit = "item(s)" if gemini_items is not None else "cells"
     st.caption(f"{len(confident)} of {len(flat_results)} {unit} classified with ≥60% confidence.")
-
-    if gemini_items is not None and confident:
-        table_rows = []
-        for r in confident:
-            agree = "✅ agree" if r["gemini_label"].lower().split()[-1] in r["predicted_class"].lower() else "↔️ differ"
-            table_rows.append({
-                "Our model's label": f"{r['icon']} {r['predicted_class'].title()}",
-                "Confidence": f"{r['confidence']*100:.0f}%",
-                "Gemini's guess": r["gemini_label"],
-                "Agreement": agree,
-            })
-        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
     counts = {}
     for r in confident:
