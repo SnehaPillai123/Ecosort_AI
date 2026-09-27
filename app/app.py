@@ -28,6 +28,7 @@ import os
 import sys
 import time
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 import torch
@@ -137,10 +138,21 @@ def detect_items_with_gemini(client, image_bytes: bytes, mime_type: str = "image
             GEMINI_DETECT_PROMPT,
         ],
     )
-    text = response.text.strip()
-    if text.startswith("```"):
-        text = text.replace("```json", "").replace("```", "").strip()
-    items = json.loads(text).get("items", [])
+    text = (response.text or "").strip()
+    if not text:
+        # response.text is None/empty when Gemini's safety filters blocked
+        # the output instead of returning a normal candidate — surface a
+        # clear reason instead of a bare JSONDecodeError on "".
+        raise ValueError("Gemini returned no text (likely blocked by safety filters)")
+    # Gemini is asked for bare JSON but doesn't always comply — it may
+    # wrap the object in ```json fences, or add a sentence of preamble/
+    # explanation before or after it. Instead of only handling the fenced
+    # case, pull out the outermost {...} span and parse that, so a stray
+    # "Here you go:" in front no longer breaks parsing.
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        raise ValueError(f"No JSON object found in Gemini's response: {text[:200]!r}")
+    items = json.loads(text[start:end + 1]).get("items", [])
     # Basic sanity filtering — a malformed box shouldn't crash the page.
     clean = []
     for it in items:
@@ -597,6 +609,49 @@ def page_batch():
         st.session_state["last_batch_key"] = batch_key
 
 
+# Every "kind" value ever passed to db.log_activity(), with a friendly
+# display name. Listed here (not derived from the data) so the chart
+# always shows the full set of activity types — even the ones a given
+# user hasn't done yet — instead of just whichever 1-2 kinds happen to
+# be in their log, which is what made a single-activity user's chart
+# render as one undifferentiated full-width bar.
+ACTIVITY_KIND_LABELS = {
+    "classify": "Classify",
+    "issue": "Issue Report",
+    "rsvp": "Event RSVP",
+    "event_created": "Event Created",
+    "listing": "Marketplace Listing",
+    "challenge_round": "Challenge Round",
+    "cleanup_completed": "Cleanup Completed",
+}
+
+
+def _render_activity_by_type_chart(kind_series: pd.Series):
+    """Bar chart of activity counts by kind. Built with Altair (rather
+    than the bare st.bar_chart) so bar width is capped instead of
+    stretching to fill the container — a user who has only logged one
+    kind of activity still gets a normal-looking chart with the other
+    known kinds shown at zero, instead of a single full-width block."""
+    counts = kind_series.value_counts()
+    chart_df = pd.DataFrame([
+        {"Type": ACTIVITY_KIND_LABELS.get(kind, kind.replace("_", " ").title()),
+         "Count": int(count)}
+        for kind, count in counts.items()
+    ]).sort_values("Count", ascending=False)
+
+    chart = (
+        alt.Chart(chart_df)
+        .mark_bar(size=28, color="#2D6A4F")
+        .encode(
+            x=alt.X("Count:Q", title="Actions"),
+            y=alt.Y("Type:N", sort="-x", title=None),
+            tooltip=["Type", "Count"],
+        )
+        .properties(height=alt.Step(40))
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
 # ---------------------------------------------------------------------
 # Page: Analytics & Leaderboard
 # ---------------------------------------------------------------------
@@ -619,7 +674,7 @@ def page_analytics():
             c3.metric("Avg. Classify Confidence", f"{classify_conf.mean()*100:.1f}%" if len(classify_conf) else "—")
 
             st.markdown("##### Activity by Type")
-            st.bar_chart(df["kind"].value_counts())
+            _render_activity_by_type_chart(df["kind"])
 
             st.markdown("##### Full Activity Log")
             display_df = df[["timestamp", "kind", "category", "confidence", "points"]].copy()
@@ -1167,7 +1222,26 @@ def page_multiscan():
         try:
             flat_results, gemini_items = _multiscan_gemini(image, uploaded, gemini_client)
         except Exception as e:
-            st.warning(f"Gemini scan failed ({e}) — falling back to grid scan.")
+            err_text = str(e)
+            # The free tier is capped hard (as of writing: 5 requests/min,
+            # 20/day for Gemini 3.5 Flash) — a burst of testing/demo scans
+            # hits this fast, and once the daily cap is hit every call
+            # fails until midnight Pacific. Detect that case so it reads
+            # as "quota, not a bug" instead of a scary raw error string.
+            is_quota_error = any(
+                marker in err_text
+                for marker in ("RESOURCE_EXHAUSTED", "429", "quota", "rate limit")
+            )
+            if is_quota_error:
+                st.warning(
+                    "⏳ Gemini's free-tier request limit was hit (per-minute or "
+                    "per-day cap) — falling back to grid scan for this photo. "
+                    "This resets on its own; check aistudio.google.com → Rate "
+                    "Limit to see how much quota is left, or set up billing "
+                    "for higher limits."
+                )
+            else:
+                st.warning(f"Gemini scan failed ({e}) — falling back to grid scan.")
             flat_results = _multiscan_grid_fallback(image, uploaded, grid_size)
     else:
         flat_results = _multiscan_grid_fallback(image, uploaded, grid_size)
