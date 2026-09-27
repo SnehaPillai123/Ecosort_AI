@@ -1,11 +1,10 @@
-> **📦 This is the final submission package.** Quick orientation:
-> - `Smart_Waste_Classifier_Colab.ipynb` — run this top-to-bottom in Google Colab (GPU) to train the model and launch the live demo. Real results from our actual run: **95.9% validation accuracy across 10 classes** (see Section 5).
-> - `Smart_Waste_Classifier_Presentation.pptx` — competition slide deck, already filled in with real accuracy numbers, confusion matrix, and misclassified-examples grid from our training run.
-> - `EcoSort_AI_Report.docx` — the formal written project report.
+> **📦 Quick orientation:**
+> - `Smart_Waste_Classifier_Colab.ipynb` — run this top-to-bottom in Google Colab (GPU) to train the model and launch the live demo. Real results from an actual run: **95.91% validation accuracy across 10 classes** (see `eval_results/`).
 > - `app/`, `src/` — full source code for the classifier (MobileNetV2 + Grad-CAM + OOD detection) and the Streamlit web app (community hub, analytics, impact map, route planner, etc.).
+> - `eval_results/` — real evaluation output from that run: confusion matrix, per-class precision/recall/F1, misclassified-examples grid, a Grad-CAM example.
 > - `requirements.txt` — install with `pip install -r requirements.txt` to run the app locally once you have a trained `models/waste_classifier.pth` (from the notebook).
 >
-> **Before presenting:** open the notebook in Colab, run all cells (Runtime → GPU), and launch Section 7's live demo — that gives you a real, working app to demonstrate instead of slides alone.
+> **Before presenting:** open the notebook in Colab, run all cells (Runtime → GPU), and launch Section 7's live demo — that gives you a real, working app to demonstrate.
 
 # 🌱 EcoSort AI — "No Green Deed Is Too Small."
 
@@ -55,6 +54,22 @@ classifier can speed up and standardize sorting at the point of disposal.
 - Predicted category (e.g., "Plastic")
 - Confidence score
 - Disposal guidance text (which bin, any special handling notes)
+
+## Results
+
+Real evaluation output from an actual training run (15 epochs,
+MobileNetV2, 10 consolidated classes) lives in `eval_results/`:
+
+- **95.91% overall validation accuracy** (2,321 validation images)
+- Per-class precision/recall/F1 — weakest classes are `metal` (F1
+  0.900) and `plastic` (F1 0.908)
+- Confusion matrix and a grid of the 95 misclassified images (mostly
+  `cardboard` confused with `paper`)
+- A Grad-CAM heatmap example showing model attention
+
+See `eval_results/README.md` for what each file is and how to
+regenerate them after retraining.
+
 
 ## 6. Real-Life Application
 - Smart recycling bins in campuses/malls/offices
@@ -117,6 +132,7 @@ closes the gap the original confidence-only approach left open.
 smart-waste-classifier/
 ├── data/                # dataset goes here (see data/README.md)
 ├── models/              # trained model weights saved here
+├── eval_results/         # real evaluation output — accuracy, confusion matrix, etc.
 ├── uploads/issues/      # photos attached to community issue reports
 ├── community.db         # shared SQLite database (created on first run)
 ├── src/

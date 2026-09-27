@@ -1,0 +1,18 @@
+Overall accuracy: 95.91%
+
+              precision    recall  f1-score   support
+
+     battery      0.946     0.986     0.965       141
+   cardboard      0.933     0.947     0.940       133
+     clothes      0.994     0.981     0.987       798
+       glass      0.959     0.924     0.941       301
+       metal      0.897     0.904     0.900       115
+     organic      0.986     0.966     0.976       147
+       paper      0.924     0.924     0.924       157
+     plastic      0.901     0.915     0.908       129
+       shoes      0.939     0.983     0.960       296
+       trash      0.971     0.962     0.966       104
+
+    accuracy                          0.959      2321
+   macro avg      0.945     0.949     0.947      2321
+weighted avg      0.960     0.959     0.959      2321
