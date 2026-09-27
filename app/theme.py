@@ -118,31 +118,72 @@ def inject_css():
            ---- so every page (not just the hero) feels alive ---- */
         [data-testid="stAppViewContainer"] {{
             background:
-                radial-gradient(circle, {PALETTE['moss']}26 1.1px, transparent 1.1px);
-            background-size: 22px 22px;
+                radial-gradient(circle, {PALETTE['moss']}3d 1.4px, transparent 1.4px);
+            background-size: 24px 24px;
             background-color: {PALETTE['cream']};
             position: relative;
+            animation: ecoGridDrift 40s linear infinite;
         }}
         [data-testid="stAppViewContainer"]::before,
         [data-testid="stAppViewContainer"]::after {{
             content: "";
             position: fixed;
             border-radius: 50%;
-            filter: blur(60px);
+            filter: blur(70px);
             pointer-events: none;
             z-index: 0;
         }}
         [data-testid="stAppViewContainer"]::before {{
-            width: 480px; height: 480px;
-            background: radial-gradient(circle, {PALETTE['lime']}30 0%, transparent 70%);
-            top: -160px; right: -140px;
-            animation: ecoFloatSlow 26s ease-in-out infinite;
+            width: 620px; height: 620px;
+            background: radial-gradient(circle, {PALETTE['lime']}4a 0%, transparent 70%);
+            top: -200px; right: -180px;
+            animation: ecoFloatSlow 15s ease-in-out infinite;
         }}
         [data-testid="stAppViewContainer"]::after {{
-            width: 420px; height: 420px;
-            background: radial-gradient(circle, {PALETTE['sunshine']}22 0%, transparent 70%);
-            bottom: -140px; left: -120px;
-            animation: ecoFloat 30s ease-in-out infinite;
+            width: 560px; height: 560px;
+            background: radial-gradient(circle, {PALETTE['sunshine']}3c 0%, transparent 70%);
+            bottom: -180px; left: -160px;
+            animation: ecoFloat 18s ease-in-out infinite;
+        }}
+        /* a third, differently-colored blob + a full-page drifting
+           particle layer, so the animation reads on every page, not
+           just near the two corners the container's own ::before/
+           ::after occupy */
+        .eco-bg-blob-3 {{
+            position: fixed;
+            top: 40%; left: 45%;
+            width: 480px; height: 480px;
+            border-radius: 50%;
+            filter: blur(80px);
+            pointer-events: none;
+            z-index: 0;
+            background: radial-gradient(circle, {PALETTE['sky']}30 0%, transparent 70%);
+            animation: ecoFloatSlow 20s ease-in-out infinite reverse;
+        }}
+        .eco-bg-particles {{
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            z-index: 0;
+            overflow: hidden;
+        }}
+        .eco-bg-particles span {{
+            position: absolute;
+            font-size: 1.5rem;
+            opacity: 0.35;
+            animation: ecoDriftBig 16s ease-in-out infinite;
+            filter: drop-shadow(0 4px 6px rgba(15,61,46,0.15));
+        }}
+        .eco-bg-particles span:nth-child(1) {{ top: 8%;  left: 12%; font-size: 1.8rem; animation-delay: 0s;   animation-duration: 14s; }}
+        .eco-bg-particles span:nth-child(2) {{ top: 22%; left: 85%; font-size: 1.3rem; animation-delay: 2s;   animation-duration: 18s; }}
+        .eco-bg-particles span:nth-child(3) {{ top: 48%; left: 6%;  font-size: 1.6rem; animation-delay: 4s;   animation-duration: 15s; }}
+        .eco-bg-particles span:nth-child(4) {{ top: 64%; left: 92%; font-size: 1.4rem; animation-delay: 1s;   animation-duration: 17s; }}
+        .eco-bg-particles span:nth-child(5) {{ top: 80%; left: 20%; font-size: 1.7rem; animation-delay: 3s;   animation-duration: 13s; }}
+        .eco-bg-particles span:nth-child(6) {{ top: 88%; left: 70%; font-size: 1.2rem; animation-delay: 5s;   animation-duration: 19s; }}
+        .eco-bg-particles span:nth-child(7) {{ top: 35%; left: 55%; font-size: 1.5rem; animation-delay: 2.6s; animation-duration: 16s; }}
+        @media (prefers-reduced-motion: reduce) {{
+            [data-testid="stAppViewContainer"] {{ animation: none !important; }}
+            .eco-bg-blob-3, .eco-bg-particles span {{ animation: none !important; }}
         }}
         .block-container {{
             padding-top: 4.5rem;
@@ -177,16 +218,26 @@ def inject_css():
         }}
         @keyframes ecoFloat {{
             0%, 100% {{ transform: translate(0, 0); }}
-            50%      {{ transform: translate(-14px, 18px); }}
+            50%      {{ transform: translate(-40px, 46px); }}
         }}
         @keyframes ecoFloatSlow {{
             0%, 100% {{ transform: translate(0, 0) scale(1); }}
-            50%      {{ transform: translate(12px, -10px) scale(1.05); }}
+            50%      {{ transform: translate(34px, -30px) scale(1.12); }}
         }}
         @keyframes ecoDrift {{
             0%   {{ transform: translate(0,0) rotate(0deg); }}
             50%  {{ transform: translate(10px,-16px) rotate(8deg); }}
             100% {{ transform: translate(0,0) rotate(0deg); }}
+        }}
+        @keyframes ecoGridDrift {{
+            0%   {{ background-position: 0 0; }}
+            100% {{ background-position: 240px 240px; }}
+        }}
+        @keyframes ecoDriftBig {{
+            0%, 100% {{ transform: translate(0, 0) rotate(0deg); }}
+            25%      {{ transform: translate(18px, -26px) rotate(10deg); }}
+            50%      {{ transform: translate(-14px, -12px) rotate(-6deg); }}
+            75%      {{ transform: translate(-22px, 20px) rotate(6deg); }}
         }}
         @keyframes ecoPop {{
             0%   {{ opacity: 0; transform: translateY(10px) scale(0.94); }}
@@ -842,6 +893,16 @@ def inject_css():
             transform: scaleY(1.4);
         }}
         </style>
+        <div class="eco-bg-blob-3" aria-hidden="true"></div>
+        <div class="eco-bg-particles" aria-hidden="true">
+            <span>🍃</span>
+            <span>♻️</span>
+            <span>🌿</span>
+            <span>✨</span>
+            <span>🍂</span>
+            <span>♻️</span>
+            <span>🌱</span>
+        </div>
         <div class="eco-mascot" aria-hidden="true">
             <div class="caption">sort right, every time</div>
             <span class="sparkle wet">✨</span>
