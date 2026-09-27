@@ -131,7 +131,7 @@ def detect_items_with_gemini(client, image_bytes: bytes, mime_type: str = "image
     normalized coordinates, or raises on failure (caller handles fallback).
     """
     response = client.models.generate_content(
-        model="gemini-3.5-flash",
+        model="gemini-2.5-flash",
         contents=[
             genai_types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
             GEMINI_DETECT_PROMPT,
@@ -897,9 +897,6 @@ def page_multiscan():
                 "- An item spanning multiple cells may be counted more than once."
             )
 
-    # Always defined, so scan_key below never hits an UnboundLocalError —
-    # only shown to the user (and actually used) when Gemini isn't active.
-    grid_size = 3
     if not gemini_client:
         grid_size = st.select_slider("Grid size", options=[2, 3, 4], value=3)
 
@@ -917,7 +914,7 @@ def page_multiscan():
             flat_results, gemini_items = _multiscan_gemini(image, uploaded, gemini_client)
         except Exception as e:
             st.warning(f"Gemini scan failed ({e}) — falling back to grid scan.")
-            flat_results = _multiscan_grid_fallback(image, uploaded, grid_size)
+            flat_results = _multiscan_grid_fallback(image, uploaded)
     else:
         flat_results = _multiscan_grid_fallback(image, uploaded, grid_size)
 
