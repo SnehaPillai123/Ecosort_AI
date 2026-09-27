@@ -11,3 +11,4 @@ requests
 open-clip-torch
 ftfy
 regex
+google-genai

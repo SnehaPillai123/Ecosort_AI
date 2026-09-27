@@ -22,6 +22,8 @@ attributed and the leaderboard means something.
 """
 
 import hashlib
+import io
+import json
 import os
 import sys
 import time
@@ -31,6 +33,19 @@ import streamlit as st
 import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
+
+# Optional: Gemini is only used for object *localization* in the Smart
+# Multi-Item Scan page (finding where items are in a messy photo). The
+# actual waste classification still runs through our own MobileNetV2
+# pipeline (classify(), below) — Gemini never sets the final label. The
+# app degrades gracefully to the old grid-scan if this package or the
+# API key isn't available (see get_gemini_client()).
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except ImportError:
+    genai = None
+    genai_types = None
 
 # allow importing from src/ when running `streamlit run app/app.py` from project root
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -74,6 +89,65 @@ def get_clip_gate():
     the Mahalanobis OOD check + softmax confidence only.
     """
     return try_load_clip_gate()
+
+
+@st.cache_resource
+def get_gemini_client():
+    """
+    None if the google-genai package isn't installed or GEMINI_API_KEY
+    isn't set in Streamlit secrets — Smart Multi-Item Scan then falls
+    back to the old grid-classification method instead of crashing.
+    """
+    if genai is None:
+        return None
+    api_key = st.secrets.get("GEMINI_API_KEY") if hasattr(st, "secrets") else None
+    if not api_key:
+        return None
+    try:
+        return genai.Client(api_key=api_key)
+    except Exception:
+        return None
+
+
+GEMINI_DETECT_PROMPT = """
+You are the object-localization layer for a waste-sorting app called
+EcoSort AI. Look at this photo and find every distinct physical waste
+item visible in it.
+
+For each item return only:
+- a short "label" guess (e.g. "plastic bottle", "cardboard box")
+- a "bounding_box" as [x_min, y_min, x_max, y_max], normalized 0-1000
+
+Return ONLY valid JSON, no markdown fences, in this exact shape:
+{"items": [{"label": "...", "bounding_box": [0, 0, 0, 0]}]}
+"""
+
+
+def detect_items_with_gemini(client, image_bytes: bytes, mime_type: str = "image/jpeg"):
+    """
+    Asks Gemini only to locate objects (bounding boxes) and offer a rough
+    label for each — it does NOT decide the final waste category. Returns
+    a list of {"label": str, "bounding_box": [x1,y1,x2,y2]} in 0-1000
+    normalized coordinates, or raises on failure (caller handles fallback).
+    """
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[
+            genai_types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            GEMINI_DETECT_PROMPT,
+        ],
+    )
+    text = response.text.strip()
+    if text.startswith("```"):
+        text = text.replace("```json", "").replace("```", "").strip()
+    items = json.loads(text).get("items", [])
+    # Basic sanity filtering — a malformed box shouldn't crash the page.
+    clean = []
+    for it in items:
+        box = it.get("bounding_box")
+        if isinstance(box, list) and len(box) == 4:
+            clean.append({"label": str(it.get("label", "item")), "bounding_box": box})
+    return clean
 
 
 def classify(image: Image.Image, model, class_names, device, ood_detector=None, clip_gate=None):
@@ -702,37 +776,10 @@ def page_map():
 # training required. Technique per Cheema, Hannan & Pires, 2022:
 # tile the frame into a grid, classify each cell independently.)
 # ---------------------------------------------------------------------
-def page_multiscan():
-    theme.page_header(
-        "🧩", "Multi-Item Scan",
-        "Got a photo with several items — a messy bin, a cluttered table? "
-        "This tiles the image into a grid and classifies each cell separately, "
-        "so you don't need to photograph one item at a time.",
-    )
-
-    with st.expander("ℹ️ How this works, and its honest limits"):
-        st.markdown(
-            "- Splits your photo into an N×N grid, then runs the same trained "
-            "classifier on each cell independently.\n"
-            "- The model was trained on single, centered items — a cell that "
-            "only shows part of an item, or the background, may be "
-            "misclassified. Low-confidence cells are marked accordingly.\n"
-            "- An item that spans multiple grid cells may be counted more "
-            "than once — this is a known limitation of grid segmentation, "
-            "not a bug. A finer real fix would be object detection (e.g. "
-            "YOLO), which is future scope.\n"
-            "- Works best when items are reasonably spread out in the frame, "
-            "not tightly overlapping."
-        )
-
-    grid_size = st.select_slider("Grid size", options=[2, 3, 4], value=3)
-    uploaded = st.file_uploader("Upload a photo with multiple items", type=["jpg", "jpeg", "png"])
-
-    if uploaded is None:
-        theme.empty_state("🧩", "No photo yet", "Upload a photo to scan it as a grid.")
-        return
-
-    image = Image.open(uploaded).convert("RGB")
+def _multiscan_grid_fallback(image, uploaded, grid_size=3):
+    """Original N×N grid-tiling approach — used automatically when Gemini
+    object localization isn't available (no package/API key, or a failed
+    call), so the page never breaks."""
     w, h = image.size
     cell_w, cell_h = w // grid_size, h // grid_size
 
@@ -751,8 +798,6 @@ def page_multiscan():
                 cell_img = image.crop((left, top, right, bottom))
 
                 r = classify(cell_img, model, class_names, device, ood_detector, clip_gate)
-                # Same exact-hash duplicate guard as Classify/Batch Upload —
-                # each grid cell is its own "item" for anti-farming purposes.
                 r["image_hash"] = hashlib.md5(cell_img.tobytes()).hexdigest()
                 r["is_duplicate"] = (not r["conf_level"].get("unknown")) and db.image_hash_seen(r["image_hash"])
                 row_results.append(r)
@@ -764,8 +809,115 @@ def page_multiscan():
             results_grid.append(row_results)
 
     st.image(overlay, caption=f"{grid_size}×{grid_size} grid classification", use_container_width=True)
+    return [r for row in results_grid for r in row]
 
-    flat_results = [r for row in results_grid for r in row]
+
+def _multiscan_gemini(image, uploaded, gemini_client):
+    """Gemini locates objects (bounding boxes only); each crop is then
+    classified by our own MobileNetV2 pipeline — same as every other page.
+    Gemini's rough label is shown as a second opinion, never as the final
+    category, per the app's honesty-about-AI stance."""
+    w, h = image.size
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG")
+
+    with st.spinner("Gemini is locating items in the photo..."):
+        items = detect_items_with_gemini(gemini_client, buf.getvalue())
+
+    if not items:
+        st.warning("Gemini didn't find any distinct items — falling back to grid scan.")
+        return _multiscan_grid_fallback(image, uploaded), None
+
+    overlay = image.copy()
+    draw = ImageDraw.Draw(overlay)
+    box_color = (244, 162, 97)
+    results = []
+
+    for it in items:
+        x1, y1, x2, y2 = it["bounding_box"]
+        left = max(0, int(x1 / 1000 * w))
+        top = max(0, int(y1 / 1000 * h))
+        right = min(w, int(x2 / 1000 * w))
+        bottom = min(h, int(y2 / 1000 * h))
+        if right <= left or bottom <= top:
+            continue
+        crop = image.crop((left, top, right, bottom))
+
+        r = classify(crop, model, class_names, device, ood_detector, clip_gate)
+        r["image_hash"] = hashlib.md5(crop.tobytes()).hexdigest()
+        r["is_duplicate"] = (not r["conf_level"].get("unknown")) and db.image_hash_seen(r["image_hash"])
+        r["gemini_label"] = it["label"]
+        results.append(r)
+
+        draw.rectangle([left, top, right, bottom], outline=box_color, width=4)
+        our_label = "unsure" if r["conf_level"].get("unknown") else r["predicted_class"]
+        tag = f"{r['icon']} {our_label} {r['confidence']*100:.0f}%"
+        draw.text((left + 6, max(0, top - 22)), tag, fill=(255, 255, 255))
+        draw.text((left + 5, max(0, top - 23)), tag, fill=(27, 67, 50))
+
+    st.image(overlay, caption=f"Gemini located {len(results)} item(s) — labels are our MobileNetV2 model's", use_container_width=True)
+    return results, items
+
+
+def page_multiscan():
+    theme.page_header(
+        "🧩", "Smart Multi-Item Scan",
+        "Got a photo with several items — a messy bin, a cluttered table? "
+        "Gemini finds where each item is in the photo, then our own trained "
+        "classifier decides what each one actually is.",
+    )
+
+    gemini_client = get_gemini_client()
+
+    with st.expander("ℹ️ How this works, and its honest limits"):
+        if gemini_client:
+            st.markdown(
+                "- **Gemini (vision layer):** locates each distinct item in the "
+                "photo and offers a rough label — it does not decide the final "
+                "waste category.\n"
+                "- **Our MobileNetV2 model (classifier):** every located item is "
+                "cropped and run through the same trained model, CLIP waste-gate, "
+                "and out-of-distribution check used everywhere else in this app — "
+                "so the final label and Green Points always come from *our* model, "
+                "not Gemini.\n"
+                "- Gemini's guess is shown next to ours as a second opinion, not a "
+                "verdict — the two can disagree, and that's shown honestly.\n"
+                "- If Gemini's API is unavailable, this page automatically falls "
+                "back to the original grid-tiling method below."
+            )
+        else:
+            st.markdown(
+                "- Gemini isn't configured (no `GEMINI_API_KEY` in Streamlit "
+                "secrets, or the `google-genai` package isn't installed), so this "
+                "falls back to splitting the photo into an N×N grid and "
+                "classifying each cell independently.\n"
+                "- The model was trained on single, centered items — a cell that "
+                "only shows part of an item, or the background, may be "
+                "misclassified.\n"
+                "- An item spanning multiple cells may be counted more than once."
+            )
+
+    if not gemini_client:
+        grid_size = st.select_slider("Grid size", options=[2, 3, 4], value=3)
+
+    uploaded = st.file_uploader("Upload a photo with multiple items", type=["jpg", "jpeg", "png"])
+
+    if uploaded is None:
+        theme.empty_state("🧩", "No photo yet", "Upload a photo to scan it.")
+        return
+
+    image = Image.open(uploaded).convert("RGB")
+
+    gemini_items = None
+    if gemini_client:
+        try:
+            flat_results, gemini_items = _multiscan_gemini(image, uploaded, gemini_client)
+        except Exception as e:
+            st.warning(f"Gemini scan failed ({e}) — falling back to grid scan.")
+            flat_results = _multiscan_grid_fallback(image, uploaded)
+    else:
+        flat_results = _multiscan_grid_fallback(image, uploaded, grid_size)
+
     confident = [
         r for r in flat_results
         if r["confidence"] >= 0.6 and not r["conf_level"].get("unknown")
@@ -775,7 +927,20 @@ def page_multiscan():
 
     st.write("")
     st.markdown("#### 📋 Detected Items Summary")
-    st.caption(f"{len(confident)} of {len(flat_results)} cells classified with ≥60% confidence.")
+    unit = "item(s)" if gemini_items is not None else "cells"
+    st.caption(f"{len(confident)} of {len(flat_results)} {unit} classified with ≥60% confidence.")
+
+    if gemini_items is not None and confident:
+        table_rows = []
+        for r in confident:
+            agree = "✅ agree" if r["gemini_label"].lower().split()[-1] in r["predicted_class"].lower() else "↔️ differ"
+            table_rows.append({
+                "Our model's label": f"{r['icon']} {r['predicted_class'].title()}",
+                "Confidence": f"{r['confidence']*100:.0f}%",
+                "Gemini's guess": r["gemini_label"],
+                "Agreement": agree,
+            })
+        st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
 
     counts = {}
     for r in confident:
@@ -784,7 +949,7 @@ def page_multiscan():
 
     if counts:
         summary_df = pd.DataFrame([
-            {"Category": f"{get_icon(cat)} {cat.title()}", "Cells detected": n}
+            {"Category": f"{get_icon(cat)} {cat.title()}", f"{unit.capitalize()} detected": n}
             for cat, n in sorted(counts.items(), key=lambda x: -x[1])
         ])
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
@@ -795,12 +960,9 @@ def page_multiscan():
             summary_msg += f" ({len(confident_dup)} matched a photo already scanned before — 📎 no points for those)"
         st.success(summary_msg)
 
-        scan_key = f"{uploaded.name}_{uploaded.size}_{grid_size}"
+        scan_key = f"{uploaded.name}_{uploaded.size}_{'gemini' if gemini_items is not None else grid_size}"
         if scan_key != st.session_state.get("last_multiscan_key"):
             for r in confident:
-                # check_and_register_image_hash is the single INSERT-or-detect
-                # call — it only returns True (award points) the first time
-                # this exact cell's pixel hash is seen anywhere in the app.
                 is_new = db.check_and_register_image_hash(r["image_hash"], user_name)
                 db.log_activity(
                     user_name, "classify",
@@ -809,7 +971,7 @@ def page_multiscan():
                 )
             st.session_state["last_multiscan_key"] = scan_key
     else:
-        st.info("No cells met the 60% confidence threshold — try a photo with clearer, more separated items.")
+        st.info(f"No {unit} met the 60% confidence threshold — try a photo with clearer, more separated items.")
 
 
 # ---------------------------------------------------------------------
