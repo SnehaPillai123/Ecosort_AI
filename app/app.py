@@ -1088,6 +1088,28 @@ def gemini_label_to_category(label: str):
     return None
 
 
+# Recyclable dry-waste categories vs. categories that contaminate a
+# recycling stream if mixed in with them (organic residue/battery
+# leakage can ruin an otherwise-recyclable batch). Used by
+# check_contamination() below to flag mixed-scene scans.
+RECYCLABLE_CATEGORIES = {"plastic", "paper", "cardboard", "metal", "glass"}
+CONTAMINANT_CATEGORIES = {"organic", "biological", "battery"}
+
+
+def check_contamination(confident_results):
+    """If a scan contains BOTH recyclable items and a contaminant
+    (organic/biological/battery), flag it — mixing these degrades or
+    disqualifies the whole recycling batch in most municipal streams.
+    Returns (recyclables_present, contaminants_present) as sets of
+    category names, or (None, None) if there's nothing to flag."""
+    present = {r["predicted_class"].lower() for r in confident_results}
+    recyclables_present = present & RECYCLABLE_CATEGORIES
+    contaminants_present = present & CONTAMINANT_CATEGORIES
+    if recyclables_present and contaminants_present:
+        return recyclables_present, contaminants_present
+    return None, None
+
+
 def page_multiscan():
     theme.page_header(
         "🧩", "Smart Multi-Item Scan",
@@ -1217,6 +1239,18 @@ def page_multiscan():
     for r in confident:
         key = r["predicted_class"]
         counts[key] = counts.get(key, 0) + 1
+
+    recyclables_present, contaminants_present = check_contamination(confident)
+    if recyclables_present and contaminants_present:
+        recyc_names = ", ".join(f"{get_icon(c)} {c.title()}" for c in sorted(recyclables_present))
+        contam_names = ", ".join(f"{get_icon(c)} {c.title()}" for c in sorted(contaminants_present))
+        st.warning(
+            f"⚠️ **Possible contamination detected** — this scene mixes recyclables "
+            f"({recyc_names}) with {contam_names}, which don't belong in the same "
+            f"bin. Even a small amount of food residue, organic matter, or a leaking "
+            f"battery can contaminate an entire batch of otherwise-recyclable material "
+            f"and cause it to be landfilled instead. Separate these before disposal."
+        )
 
     if counts:
         summary_df = pd.DataFrame([
